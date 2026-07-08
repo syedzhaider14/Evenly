@@ -90,3 +90,95 @@ function formatterFor(currency: string, locale: string | undefined, signed: bool
   let formatter = formatterCache.get(key);
   if (!formatter) {
     const exponent = currencyExponent(currency);
+    formatter = new Intl.NumberFormat(locale, {
+      style: 'currency',
+      currency,
+      minimumFractionDigits: exponent,
+      maximumFractionDigits: exponent,
+      signDisplay: signed ? 'exceptZero' : 'auto',
+    });
+    formatterCache.set(key, formatter);
+  }
+  return formatter;
+}
+
+export interface FormatMoneyOptions {
+  locale?: string;
+  /** Always show a sign for non-zero values (`+$4.00`, `-$4.00`). */
+  signed?: boolean;
+}
+
+export function formatMoney(amount: Minor, currency: string, options: FormatMoneyOptions = {}): string {
+  const exponent = currencyExponent(currency);
+  return formatterFor(currency, options.locale, options.signed ?? false).format(
+    amount / 10 ** exponent,
+  );
+}
+
+/**
+ * Splits `total` into integer parts proportional to `weights` using the largest-remainder
+ * method, so the parts always add up to exactly `total`.
+ *
+ * Weights must be non-negative integers. When two parts have the same remainder, the leftover
+ * unit goes to the one that comes first after rotating the list by `rotation`. Callers pass a
+ * per-expense rotation so the same person does not absorb every odd cent.
+ */
+export function allocate(total: Minor, weights: readonly number[], rotation = 0): Minor[] {
+  if (!Number.isSafeInteger(total)) {
+    throw new RangeError(`total must be a safe integer, received ${total}`);
+  }
+  if (weights.length === 0) {
+    throw new RangeError('weights must not be empty');
+  }
+  for (const weight of weights) {
+    if (!Number.isSafeInteger(weight) || weight < 0) {
+      throw new RangeError(`weights must be non-negative integers, received ${weight}`);
+    }
+  }
+
+  const weightSum = weights.reduce((sum, weight) => sum + BigInt(weight), 0n);
+  if (weightSum === 0n) {
+    throw new RangeError('weights must not all be zero');
+  }
+
+  const sign = total < 0 ? -1 : 1;
+  const absolute = BigInt(Math.abs(total));
+  const count = weights.length;
+  const offset = ((rotation % count) + count) % count;
+
+  const parts = weights.map((weight, index) => {
+    const product = absolute * BigInt(weight);
+    return {
+      index,
+      weight,
+      quotient: product / weightSum,
+      remainder: product % weightSum,
+      priority: (index - offset + count) % count,
+    };
+  });
+
+  const distributed = parts.reduce((sum, part) => sum + part.quotient, 0n);
+  let leftover = Number(absolute - distributed);
+
+  const byRemainder = [...parts]
+    .filter((part) => part.weight > 0)
+    .sort((a, b) => {
+      if (a.remainder !== b.remainder) return a.remainder > b.remainder ? -1 : 1;
+      return a.priority - b.priority;
+    });
+
+  for (const part of byRemainder) {
+    if (leftover === 0) break;
+    part.quotient += 1n;
+    leftover -= 1;
+  }
+
+  return parts.map((part) => {
+    const value = Number(part.quotient) * sign;
+    return value === 0 ? 0 : value;
+  });
+}
+
+export function sum(values: readonly Minor[]): Minor {
+  return values.reduce((total, value) => total + value, 0);
+}
